@@ -6227,6 +6227,51 @@ errors ${window.__errors.length}${window.__errors.length?`
 .dl-only { display: none; }
 #app.duel-on .dl-only { display: inline-block; }
 #app.duel-on .h-relays, #app.duel-on .h-wm.opp, #app.duel-on .menu [data-act="restart"] { display: none !important; }
+
+/* ---- confirmed kills + tactical minimap ---- */
+.dl-killmark { position: absolute; z-index: 3; top: calc(50% + 44px); left: 50%; width: 220px; display: flex; align-items: center; flex-direction: column; gap: 5px; transform: translateX(-50%); color: var(--signal); text-align: center; text-shadow: 0 2px 10px #000; pointer-events: none; }
+.dl-killmark svg { display: block; width: 68px; height: 68px; overflow: visible; filter: drop-shadow(0 0 12px rgba(255,179,71,.35)); }
+.dl-kill-frame { fill: rgba(11,13,15,.8); stroke: currentColor; stroke-width: 1.2; }
+.dl-kill-skull { fill: var(--bone); }
+.dl-kill-ticks { fill: none; stroke: currentColor; stroke-width: 3; }
+.dl-kill-title { font: 900 30px/1 var(--f-display); letter-spacing: .3em; margin-right: -.3em; color: var(--bone); }
+.dl-kill-caption { font: 500 10px/1.3 var(--f-mono); letter-spacing: .15em; text-transform: uppercase; }
+.dl-killmark.on { animation: dl-kill-pop 1.5s ease-out both; }
+.dl-killmark.round-end { top: calc(50% + 100px); }
+@keyframes dl-kill-pop { 0% { opacity: 0; transform: translate(-50%,12px) scale(.7); } 12% { opacity: 1; transform: translate(-50%,0) scale(1.08); } 25%, 75% { opacity: 1; transform: translate(-50%,0) scale(1); } 100% { opacity: 0; transform: translate(-50%,-12px) scale(.94); } }
+.dl-map { position: absolute; top: calc(14px + var(--sat)); right: var(--gr); width: clamp(156px, 16vw, 208px); padding: 8px; border: 1px solid var(--line); border-top: 2px solid var(--signal); background: rgba(11,17,22,.9); box-shadow: 0 6px 24px rgba(0,0,0,.3); pointer-events: none; }
+.dl-map-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 7px; font: 500 10px/1 var(--f-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--bone-dim); }
+.dl-map-head b { color: var(--signal); font-weight: 500; letter-spacing: .04em; }
+.dl-map-view { position: relative; border: 1px solid rgba(232,228,218,.12); }
+.dl-map-view canvas { display: block; width: 100%; height: auto; }
+.dl-map-north { position: absolute; left: 50%; top: 2px; transform: translateX(-50%); font: 500 9px/1 var(--f-mono); color: var(--bone); }
+.dl-map-key { display: flex; justify-content: space-between; gap: 8px; margin-top: 7px; font: 500 8px/1 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--bone-dim); }
+.dl-map-key span { display: flex; align-items: center; gap: 5px; }
+.dl-map-key span::before { content: ''; display: block; width: 5px; height: 5px; flex: none; }
+.dl-map-you::before { background: var(--signal); clip-path: polygon(50% 0, 100% 100%, 50% 75%, 0 100%); }
+.dl-map-target::before { background: #86d9de; transform: rotate(45deg); }
+.duel-on .dl-map-target::before { background: var(--alarm); border-radius: 50%; transform: none; }
+.is-touch .dl-map { top: calc(64px + var(--sat)); }
+@media (max-width: 700px) {
+  .dl-map, .is-touch .dl-map { width: 132px; top: calc(82px + var(--sat)); padding: 6px; }
+  .dl-map-head { font-size: 8px; letter-spacing: .06em; }
+  .dl-map-key { font-size: 7px; gap: 4px; letter-spacing: 0; }
+  .dl-score { left: var(--gl); top: calc(82px + var(--sat)); transform: none; gap: 6px; padding: 6px 7px; font-size: 8px; letter-spacing: .04em; }
+  .dl-score span { gap: 5px; }
+  .dl-score b { font-size: 22px; }
+}
+@media (max-height: 520px) {
+  .dl-map { width: 132px; padding: 6px; }
+  .dl-killmark { top: calc(50% + 25px); gap: 3px; }
+  .dl-killmark.round-end { top: calc(50% + 80px); }
+  .dl-killmark svg { width: 44px; height: 44px; }
+  .dl-kill-title { font-size: 24px; }
+  .dl-kill-caption { font-size: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dl-killmark.on { animation-name: dl-kill-fade; }
+  @keyframes dl-kill-fade { 0%, 100% { opacity: 0; } 10%, 80% { opacity: 1; } }
+}
 </style>
 <script>
 /* Saltline duel add-on: 1v1 online over WebRTC (PeerJS). Hooks the game through window.__G; the game bundle above is untouched. */
@@ -6249,6 +6294,9 @@ errors ${window.__errors.length}${window.__errors.length?`
   let G = null;
   let T = null;
   let ui = null;
+  let killMarkTimer = 0;
+  let minimap = null;
+  let mapUpdated = 0;
 
   const S = {
     active: false,
@@ -6367,13 +6415,18 @@ errors ${window.__errors.length}${window.__errors.length?`
     };
     S.oppPos = new T.Vector3();
     buildUi();
+    buildMinimap();
     hookCombat();
     hookPlayer();
     hookEnemies();
 
     G.events.on('game:state', (e) => {
+      if (e && e.state !== 'playing') hideKillMark();
       if (!S.active || !e) return;
       if (e.state === 'playing' && e.prev !== 'paused') enterArena();
+    });
+    G.events.on('player:hitEnemy', (e) => {
+      if (!S.active && e && e.killed) showKillMark();
     });
 
     setInterval(sendState, SEND_MS);
@@ -6383,6 +6436,7 @@ errors ${window.__errors.length}${window.__errors.length?`
       const dt = Math.min(0.1, (now - last) / 1000);
       last = now;
       if (S.active) updateRemote(dt, now);
+      updateMinimap(now);
     };
     requestAnimationFrame(frame);
   }
@@ -6643,6 +6697,7 @@ errors ${window.__errors.length}${window.__errors.length?`
         r.alive = false;
         renderScore();
         call(G.hud, 'hitmarker', 'kill');
+        showKillMark();
         call(G.hud, 'feed', '<b>OPPONENT</b> down');
         if (S.me >= WIN) endRound(true);
         break;
@@ -6859,6 +6914,7 @@ errors ${window.__errors.length}${window.__errors.length?`
     ui.lobby.hidden = true;
     ui.noteText.textContent = text;
     ui.note.hidden = false;
+    hideKillMark();
     call(G.input, 'exitLock');
   }
 
@@ -7000,6 +7056,132 @@ errors ${window.__errors.length}${window.__errors.length?`
     ui.scoreOpp.textContent = String(S.opp);
   }
 
+  /* ---------- match feedback ---------- */
+
+  function hideKillMark() {
+    clearTimeout(killMarkTimer);
+    ui.killMark.hidden = true;
+    ui.killMark.classList.remove('on');
+  }
+
+  function showKillMark() {
+    if (G.game.state !== 'playing') return;
+    hideKillMark();
+    ui.killCaption.textContent = S.active ? 'Opponent eliminated' : 'Target eliminated';
+    ui.killMark.classList.toggle('round-end', S.active && S.me >= WIN);
+    ui.killMark.hidden = false;
+    void ui.killMark.offsetWidth;
+    ui.killMark.classList.add('on');
+    killMarkTimer = setTimeout(hideKillMark, 1500);
+  }
+
+  function buildMinimap() {
+    const nav = G.physics && G.physics.nav;
+    if (!nav || !nav._grid) return;
+    const grid = nav._grid();
+    const size = 192;
+    const scale = (size - 20) / (Math.max(grid.w, grid.h) * grid.cell);
+    const ox = (size - grid.w * grid.cell * scale) / 2;
+    const oz = (size - grid.h * grid.cell * scale) / 2;
+    const terrain = document.createElement('canvas');
+    terrain.width = terrain.height = size * 2;
+    ui.mapCanvas.width = ui.mapCanvas.height = size * 2;
+    const base = terrain.getContext('2d');
+    const ctx = ui.mapCanvas.getContext('2d');
+    if (!base || !ctx) return;
+    base.scale(2, 2);
+    ctx.scale(2, 2);
+    base.fillStyle = '#0b1319';
+    base.fillRect(0, 0, size, size);
+    base.fillStyle = '#1b2a32';
+    base.fillRect(ox, oz, grid.w * grid.cell * scale, grid.h * grid.cell * scale);
+    base.fillStyle = '#53616a';
+    const cell = grid.cell * scale;
+    for (let z = 0; z < grid.h; z++) {
+      for (let x = 0; x < grid.w; x++) {
+        if (grid.blocked[z * grid.w + x]) base.fillRect(ox + x * cell, oz + z * cell, cell + 0.3, cell + 0.3);
+      }
+    }
+    base.strokeStyle = 'rgba(232,228,218,.09)';
+    base.lineWidth = 0.5;
+    base.beginPath();
+    for (let x = 0; x <= grid.w; x += 20) {
+      base.moveTo(ox + x * cell, oz);
+      base.lineTo(ox + x * cell, size - oz);
+    }
+    for (let z = 0; z <= grid.h; z += 20) {
+      base.moveTo(ox, oz + z * cell);
+      base.lineTo(size - ox, oz + z * cell);
+    }
+    base.stroke();
+    minimap = { ctx, terrain, size, scale, ox, oz, grid, target: new T.Vector3() };
+  }
+
+  function updateMinimap(now) {
+    const visible = G.game.state === 'playing' && ui.lobby.hidden && ui.note.hidden;
+    ui.map.hidden = !visible || !minimap;
+    if (!visible || !minimap || now - mapUpdated < 100) return;
+    mapUpdated = now;
+    const { ctx, terrain, size, scale, ox, oz, grid } = minimap;
+    const point = (pos) => [ox + (pos.x - grid.minX) * scale, oz + (pos.z - grid.minZ) * scale];
+    ctx.drawImage(terrain, 0, 0, size, size);
+    const run = G.game.run;
+    if (!S.active && run) {
+      const objectives = run.allCut && G.level.extraction
+        ? [G.level.extraction]
+        : (run.relays || []).filter((relay) => !relay.cut).map((relay) => relay.o);
+      ctx.fillStyle = '#86d9de';
+      for (const objective of objectives) {
+        const [x, z] = point(objective.pos);
+        ctx.save();
+        ctx.translate(x, z);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillRect(-2.5, -2.5, 5, 5);
+        ctx.restore();
+      }
+    }
+    if (remoteVisible() && G.physics.lineOfSight(
+      G.player.eye,
+      minimap.target.copy(S.remote.pos).setY(S.remote.pos.y + (S.remote.crouch ? 0.8 : 1.4)),
+    )) {
+      const [x, z] = point(S.remote.pos);
+      ctx.fillStyle = '#ff654d';
+      ctx.beginPath();
+      ctx.arc(x, z, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,101,77,.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(x, z, 6, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    const [x, z] = point(G.player.pos);
+    ctx.save();
+    ctx.translate(x, z);
+    ctx.rotate(-G.player.yaw);
+    ctx.fillStyle = 'rgba(255,179,71,.14)';
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.arc(0, 0, 25, -Math.PI * 0.7, -Math.PI * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#ffbf69';
+    ctx.strokeStyle = '#0b1319';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, -7);
+    ctx.lineTo(5, 5);
+    ctx.lineTo(0, 2.5);
+    ctx.lineTo(-5, 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+    const heading = Math.round(((-G.player.yaw * 180 / Math.PI) % 360 + 360) % 360) % 360;
+    ui.mapHeading.textContent = String(heading).padStart(3, '0') + '\u00b0';
+    ui.mapLegend.textContent = S.active ? 'Contact' : 'Objective';
+  }
+
   /* ---------- UI ---------- */
 
   function buildUi() {
@@ -7008,6 +7190,19 @@ errors ${window.__errors.length}${window.__errors.length?`
     root.id = 'duel';
     root.innerHTML = `
       <div class="dl-score" hidden><span class="you">You <b data-d="me">0</b></span><i></i><span><b data-d="opp">0</b> Opponent</span></div>
+      <div class="dl-map" hidden aria-label="Tactical minimap: player position and heading">
+        <div class="dl-map-head"><span>Berth 04</span><b data-d="map-heading">000\u00b0</b></div>
+        <div class="dl-map-view"><canvas width="384" height="384" data-d="map-canvas" aria-label="Arena map, north up"></canvas><span class="dl-map-north">N</span></div>
+        <div class="dl-map-key"><span class="dl-map-you">You</span><span class="dl-map-target" data-d="map-legend">Objective</span></div>
+      </div>
+      <div class="dl-killmark" hidden role="status" aria-live="polite" aria-atomic="true">
+        <svg viewBox="0 0 80 80" aria-hidden="true" focusable="false">
+          <path class="dl-kill-frame" d="M28 5h24l23 23v24L52 75H28L5 52V28Z M34 1h12 M34 79h12 M1 34v12 M79 34v12"/>
+          <path class="dl-kill-skull" d="M40 20c-12 0-20 8-20 19 0 8 4 13 10 16v8h7v-6h6v6h7v-8c6-3 10-8 10-16 0-11-8-19-20-19Zm-9 15 7 4-3 7h-8l-2-6Zm18 0 6 5-2 6h-8l-3-7ZM40 44l4 7h-8Z" fill-rule="evenodd"/>
+          <path class="dl-kill-ticks" d="m11 11 9 9m40 40 9 9M69 11l-9 9M20 60l-9 9"/>
+        </svg>
+        <b class="dl-kill-title">KILL</b><span class="dl-kill-caption" data-d="kill-caption">Opponent eliminated</span>
+      </div>
       <div class="dl-veil" hidden><div class="dl-veil-k"></div><div class="dl-veil-h"></div><div class="dl-veil-s"></div></div>
       <div class="dl-lobby" hidden>
         <div class="dl-card" role="dialog" aria-modal="true" aria-label="Duel online">
@@ -7056,6 +7251,12 @@ errors ${window.__errors.length}${window.__errors.length?`
     const statusEl = q('status');
     ui = {
       root,
+      killMark: root.querySelector('.dl-killmark'),
+      killCaption: q('kill-caption'),
+      map: root.querySelector('.dl-map'),
+      mapCanvas: q('map-canvas'),
+      mapHeading: q('map-heading'),
+      mapLegend: q('map-legend'),
       lobby: root.querySelector('.dl-lobby'),
       note: root.querySelector('.dl-note'),
       noteText: q('note'),
